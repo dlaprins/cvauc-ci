@@ -8,6 +8,9 @@ to compute influence curve-based confidence intervals for AUC, following:
     cross-validated area under the ROC curve estimates." Electronic Journal of
     Statistics, 9(1), 1583-1607.
 
+In addition, functionality is added for evaluating model performance on subsegments of the data
+(e.g., specific categories in a categorical column) while training on the full dataset.
+
 Usage:
     from cvauc import cross_val_auc
     
@@ -17,6 +20,16 @@ Usage:
         cv=5,
         confidence_level=0.95
     )
+    
+    # Evaluate on subgroups (X must be a DataFrame with a categorical column):
+    scores, conf_int = cross_val_auc(
+        estimator, X, y,
+        scoring='roc_auc',
+        cv=5,
+        confidence_level=0.95,
+        eval_subset=('group', 'A')  # Evaluate only on group A
+    )
+    # Returns: scores['A'], conf_int['score_A']
 
 Modified sklearn functions (changes marked with # NEW):
     - cross_validate() - Added return_influence_curves and eval_subset parameters
