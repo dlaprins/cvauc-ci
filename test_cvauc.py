@@ -1,0 +1,534 @@
+"""
+Tests for cvauc: Cross-validated AUC with influence curve-based confidence intervals.
+
+Test organization:
+- TestInfluenceCurveMath: Unit tests for IC computation with hand-calculated example
+- TestCrossValAUCPipeline: Integration tests for full cross_val_auc function
+- TestEvalSubsetBasic: Basic eval_subset functionality
+- TestCategoricalColumnExclusion: Verify categorical column is never used by model
+- TestIntegerCategories: Integer (ordinal) categorical values
+
+The hand-calculated example (used in TestInfluenceCurveMath):
+- 6 samples: y_true = [0, 1, 0, 1, 0, 1]
+- X = [[0], [1], [2], [3], [4], [5]] (indices as features)
+- 2-fold CV: fold 0 tests [0,1,2], fold 1 tests [3,4,5]
+- Mock estimator returns: y_pred = [0.6, 0.5, 0.4, 0.6, 0.3, 0.8]
+
+Fold 0: AUC=0.5, ICs=[-0.75, 0.0, 0.75]
+Fold 1: AUC=1.0, ICs=[0.0, 0.0, 0.0]
+Combined: variance=0.09375, mean AUC=0.75, 95% CI~(0.505, 0.995)
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import KFold
+
+from cvauc import (
+    cross_val_auc,
+    _compute_influence_curve_single_fold,
+    compute_variance,
+    compute_confidence_interval,
+)
+
+
+# =============================================================================
+# Fixtures and Helpers
+# =============================================================================
+
+class MockClassifier(BaseEstimator, ClassifierMixin):
+    """Mock classifier returning predetermined probabilities based on X values.
+    
+    X values are treated as indices into pred_proba_map.
+    """
+    
+    def __init__(self, pred_proba_map):
+        self.pred_proba_map = pred_proba_map
+        self.classes_ = np.array([0, 1])
+    
+    def fit(self, X, y):
+        return self
+    
+    def predict_proba(self, X):
+        probs = []
+        for x in X:
+            idx = int(x[0])
+            p1 = self.pred_proba_map[idx]
+            probs.append([1 - p1, p1])
+        return np.array(probs)
+    
+    def predict(self, X):
+        proba = self.predict_proba(X)
+        return (proba[:, 1] >= 0.5).astype(int)
+
+
+@pytest.fixture
+def hand_calculated_example():
+    """The 6-sample hand-calculated example from the module docstring."""
+    X = np.array([[0], [1], [2], [3], [4], [5]])
+    y = np.array([0, 1, 0, 1, 0, 1])
+    pred_proba_map = {0: 0.6, 1: 0.5, 2: 0.4, 3: 0.6, 4: 0.3, 5: 0.8}
+    return X, y, pred_proba_map
+
+
+@pytest.fixture
+def simple_dataframe():
+    """Simple DataFrame for eval_subset tests."""
+    np.random.seed(42)
+    n = 200
+    return pd.DataFrame({
+        'x1': np.random.randn(n),
+        'x2': np.random.randn(n),
+        'category': np.random.choice(['A', 'B', 'C'], n)
+    })
+
+
+# =============================================================================
+# TestInfluenceCurveMath: Unit tests for IC computation
+# =============================================================================
+
+class TestInfluenceCurveMath:
+    """Unit tests for influence curve computation functions."""
+    
+    def test_compute_influence_curve_fold0(self):
+        """Test IC computation for fold 0 (AUC=0.5)."""
+        y_pred = np.array([0.6, 0.5, 0.4])
+        y_true = np.array([0, 1, 0])
+        
+        ic = _compute_influence_curve_single_fold(y_pred, y_true)
+        
+        expected_ic = np.array([-0.75, 0.0, 0.75])
+        np.testing.assert_array_almost_equal(ic, expected_ic, decimal=10)
+    
+    def test_compute_influence_curve_fold1(self):
+        """Test IC computation for fold 1 (perfect AUC=1.0)."""
+        y_pred = np.array([0.6, 0.3, 0.8])
+        y_true = np.array([1, 0, 1])
+        
+        ic = _compute_influence_curve_single_fold(y_pred, y_true)
+        
+        expected_ic = np.array([0.0, 0.0, 0.0])
+        np.testing.assert_array_almost_equal(ic, expected_ic, decimal=10)
+    
+    def test_compute_influence_curve_single_class(self):
+        """IC returns zeros when only one class is present."""
+        y_pred = np.array([0.6, 0.5, 0.4])
+        y_true = np.array([1, 1, 1])  # All positive
+        
+        ic = _compute_influence_curve_single_fold(y_pred, y_true)
+        
+        np.testing.assert_array_equal(ic, np.zeros(3))
+    
+    def test_compute_variance(self):
+        """Test variance computation from ICs."""
+        ic_all = np.array([-0.75, 0.0, 0.75, 0.0, 0.0, 0.0])
+        V = 2
+        
+        variance = compute_variance(ic_all, V)
+        
+        # variance = sum(IC^2) / (n * V) = 1.125 / 12 = 0.09375
+        assert abs(variance - 0.09375) < 1e-10
+    
+    def test_compute_confidence_interval(self):
+        """Test CI computation from variance."""
+        estimate = 0.75
+        variance = 0.09375
+        n = 6
+        
+        ci = compute_confidence_interval(estimate, variance, n, confidence_level=0.95)
+        
+        expected_bound = 1.96 * np.sqrt(0.09375) / np.sqrt(6)
+        expected_ci = (0.75 - expected_bound, 0.75 + expected_bound)
+        
+        assert abs(ci[0] - expected_ci[0]) < 1e-5
+        assert abs(ci[1] - expected_ci[1]) < 1e-5
+    
+    def test_compute_confidence_interval_different_levels(self):
+        """Test CI at different confidence levels."""
+        estimate = 0.8
+        variance = 0.1
+        n = 100
+        
+        ci_90 = compute_confidence_interval(estimate, variance, n, confidence_level=0.90)
+        ci_95 = compute_confidence_interval(estimate, variance, n, confidence_level=0.95)
+        ci_99 = compute_confidence_interval(estimate, variance, n, confidence_level=0.99)
+        
+        # Higher confidence -> wider interval
+        width_90 = ci_90[1] - ci_90[0]
+        width_95 = ci_95[1] - ci_95[0]
+        width_99 = ci_99[1] - ci_99[0]
+        
+        assert width_90 < width_95 < width_99
+
+
+# =============================================================================
+# TestCrossValAUCPipeline: Integration tests
+# =============================================================================
+
+class TestCrossValAUCPipeline:
+    """Integration tests for the full cross_val_auc function."""
+    
+    def test_full_pipeline_hand_calculated(self, hand_calculated_example):
+        """Test cross_val_auc with hand-calculated expected outputs."""
+        X, y, pred_proba_map = hand_calculated_example
+        clf = MockClassifier(pred_proba_map)
+        cv = KFold(n_splits=2, shuffle=False)
+        
+        scores, conf_int = cross_val_auc(
+            clf, X, y,
+            scoring='roc_auc',
+            cv=cv,
+            confidence_level=0.95
+        )
+        
+        # Verify fold AUCs
+        np.testing.assert_array_almost_equal(scores, [0.5, 1.0], decimal=10)
+        
+        # Verify confidence interval
+        expected_bound = 1.96 * np.sqrt(0.09375) / np.sqrt(6)
+        assert abs(conf_int[0] - (0.75 - expected_bound)) < 1e-4
+        assert abs(conf_int[1] - (0.75 + expected_bound)) < 1e-4
+    
+    def test_no_confidence_interval(self, hand_calculated_example):
+        """Test cross_val_auc without CI computation."""
+        X, y, pred_proba_map = hand_calculated_example
+        clf = MockClassifier(pred_proba_map)
+        cv = KFold(n_splits=2, shuffle=False)
+        
+        scores, conf_int = cross_val_auc(
+            clf, X, y,
+            scoring='roc_auc',
+            cv=cv,
+            confidence_level=None
+        )
+        
+        np.testing.assert_array_almost_equal(scores, [0.5, 1.0], decimal=10)
+        assert conf_int is None
+    
+    def test_with_real_estimator(self):
+        """Test with a real sklearn estimator."""
+        np.random.seed(42)
+        n = 200
+        X = np.random.randn(n, 5)
+        y = (X[:, 0] + X[:, 1] > 0).astype(int)
+        
+        scores, conf_int = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=5),
+            confidence_level=0.95
+        )
+        
+        assert len(scores) == 5
+        assert all(0 <= s <= 1 for s in scores)
+        assert conf_int[0] < conf_int[1]
+        assert 0 <= conf_int[0] <= 1
+        assert 0 <= conf_int[1] <= 1
+
+
+# =============================================================================
+# TestEvalSubsetBasic: Basic eval_subset functionality
+# =============================================================================
+
+class TestEvalSubsetBasic:
+    """Test basic eval_subset functionality."""
+    
+    def test_single_category(self, simple_dataframe):
+        """Test evaluation on a single category."""
+        X = simple_dataframe
+        y = (X['x1'] + X['x2'] > 0).astype(int)
+        
+        scores, ci = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=3),
+            eval_subset=('category', 'A'),
+            confidence_level=0.95
+        )
+        
+        assert 'A' in scores
+        assert len(scores['A']) == 3
+        assert ci is not None
+    
+    def test_all_categories(self, simple_dataframe):
+        """Test evaluation on all categories separately."""
+        X = simple_dataframe
+        y = (X['x1'] > 0).astype(int)
+        
+        scores, ci = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=3),
+            eval_subset=('category', None),
+            confidence_level=0.95
+        )
+        
+        for cat in ['A', 'B', 'C']:
+            assert cat in scores
+            assert len(scores[cat]) == 3
+            assert f'score_{cat}' in ci
+    
+    def test_without_confidence_interval(self, simple_dataframe):
+        """Test eval_subset without CI computation."""
+        X = simple_dataframe
+        y = (X['x1'] > 0).astype(int)
+        
+        scores, ci = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=2),
+            eval_subset=('category', None),
+            confidence_level=None
+        )
+        
+        assert isinstance(scores, dict)
+        assert ci is None
+    
+    def test_normal_mode_still_works(self):
+        """Test that normal mode (without eval_subset) still works."""
+        np.random.seed(42)
+        n = 100
+        X = pd.DataFrame({
+            'x1': np.random.randn(n),
+            'x2': np.random.randn(n),
+        })
+        y = (X['x1'] + X['x2'] > 0).astype(int)
+        
+        scores, ci = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=3),
+            eval_subset=None,
+            confidence_level=0.95
+        )
+        
+        assert isinstance(scores, np.ndarray)
+        assert len(scores) == 3
+        assert isinstance(ci, tuple)
+    
+    def test_invalid_column_raises(self):
+        """Test that invalid column name raises ValueError."""
+        np.random.seed(42)
+        X = pd.DataFrame({'x': np.random.randn(50)})
+        y = (X['x'] > 0).astype(int)
+        
+        with pytest.raises(ValueError, match="not found"):
+            cross_val_auc(
+                LogisticRegression(),
+                X, y,
+                eval_subset=('nonexistent', 'A')
+            )
+    
+    def test_requires_dataframe(self):
+        """Test that eval_subset requires DataFrame."""
+        np.random.seed(42)
+        X = np.random.randn(50, 2)
+        y = (X[:, 0] > 0).astype(int)
+        
+        with pytest.raises(ValueError, match="DataFrame"):
+            cross_val_auc(
+                LogisticRegression(),
+                X, y,
+                eval_subset=('col', 'A')
+            )
+
+
+# =============================================================================
+# TestCategoricalColumnExclusion: Verify column is never used by model
+# =============================================================================
+
+class TestCategoricalColumnExclusion:
+    """Test that categorical column is never passed to the model.
+    
+    These tests use non-numeric categories that would cause sklearn
+    to fail with "could not convert string to float" if passed to fit/predict.
+    """
+    
+    def test_string_categories_excluded(self):
+        """String values in categorical column would fail if passed to model."""
+        np.random.seed(42)
+        n = 200
+        X = pd.DataFrame({
+            'x1': np.random.randn(n),
+            'x2': np.random.randn(n),
+            'group': ['GROUP_' + str(i % 4) for i in range(n)]
+        })
+        y = (X['x1'] + X['x2'] > 0).astype(int)
+        
+        # This succeeds only if categorical column is excluded
+        scores, _ = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=3),
+            eval_subset=('group', 'GROUP_0'),
+            confidence_level=0.95
+        )
+        
+        assert 'GROUP_0' in scores
+    
+    def test_tuple_categories_excluded(self):
+        """Tuple values would fail if passed to sklearn."""
+        np.random.seed(42)
+        n = 150
+        categories = [('Group', 1), ('Group', 2), ('Group', 3)]
+        
+        X = pd.DataFrame({
+            'x1': np.random.randn(n),
+            'x2': np.random.randn(n),
+            'metadata': [categories[i % 3] for i in range(n)]
+        })
+        y = (X['x1'] + X['x2'] > 0).astype(int)
+        
+        scores, _ = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=2),
+            eval_subset=('metadata', categories[0]),
+            confidence_level=0.95
+        )
+        
+        assert categories[0] in scores
+    
+    def test_model_uses_correct_features(self):
+        """Verify model predictions depend only on non-categorical features."""
+        np.random.seed(42)
+        n = 200
+        X = pd.DataFrame({
+            'useful_feature': np.random.randn(n),
+            'noise': np.random.randn(n) * 0.1,
+            'category': np.random.choice(['A', 'B'], n)
+        })
+        # Target depends ONLY on useful_feature
+        y = (X['useful_feature'] > 0).astype(int)
+        
+        scores, _ = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=3),
+            eval_subset=('category', None),
+            confidence_level=0.95
+        )
+        
+        # Both categories should have high AUC (model uses useful_feature)
+        for cat in ['A', 'B']:
+            mean_auc = np.mean(scores[cat])
+            assert mean_auc > 0.8, f"AUC too low for {cat}: {mean_auc:.3f}"
+
+
+# =============================================================================
+# TestIntegerCategories: Integer (ordinal) categorical values
+# =============================================================================
+
+class TestIntegerCategories:
+    """Test integer (ordinal) categorical values."""
+    
+    def test_integer_single_category(self):
+        """Test evaluation on single integer category."""
+        np.random.seed(42)
+        n = 200
+        X = pd.DataFrame({
+            'x1': np.random.randn(n),
+            'x2': np.random.randn(n),
+            'age_group': np.random.choice([1, 2, 3, 4, 5], n)
+        })
+        y = (X['x1'] + X['x2'] > 0).astype(int)
+        
+        scores, ci = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=3),
+            eval_subset=('age_group', 3),
+            confidence_level=0.95
+        )
+        
+        # Key should be integer 3, not string '3'
+        assert 3 in scores
+        assert len(scores[3]) == 3
+    
+    def test_integer_all_categories(self):
+        """Test evaluation on all integer categories."""
+        np.random.seed(42)
+        n = 400
+        X = pd.DataFrame({
+            'x1': np.random.randn(n),
+            'x2': np.random.randn(n),
+            'bracket': np.random.choice([10, 20, 30, 40], n)
+        })
+        y = (X['x1'] + X['x2'] > 0).astype(int)
+        
+        scores, ci = cross_val_auc(
+            LogisticRegression(random_state=42, max_iter=1000),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=3),
+            eval_subset=('bracket', None),
+            confidence_level=0.95
+        )
+        
+        for bracket in [10, 20, 30, 40]:
+            assert bracket in scores
+            assert f'score_{bracket}' in ci
+    
+    def test_zero_based_categories(self):
+        """Test 0-based integer categories (0, 1, 2)."""
+        np.random.seed(42)
+        n = 200
+        X = pd.DataFrame({
+            'x': np.random.randn(n),
+            'category': np.random.choice([0, 1, 2], n)
+        })
+        y = (X['x'] > 0).astype(int)
+        
+        scores, _ = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=2),
+            eval_subset=('category', 0)
+        )
+        
+        assert 0 in scores
+    
+    def test_integer_not_used_as_feature(self):
+        """Verify integer categories are not used as model features."""
+        np.random.seed(42)
+        n = 300
+        
+        X = pd.DataFrame({
+            'useful_feature': np.random.randn(n),
+            'noise': np.random.randn(n) * 0.01,
+            'category': np.random.choice([0, 1], n)
+        })
+        y = (X['useful_feature'] > 0).astype(int)
+        
+        scores, _ = cross_val_auc(
+            LogisticRegression(random_state=42),
+            X, y,
+            scoring='roc_auc',
+            cv=KFold(n_splits=3),
+            eval_subset=('category', None),
+            confidence_level=0.95
+        )
+        
+        # Both categories should have similar, high AUC
+        auc_0 = np.mean(scores[0])
+        auc_1 = np.mean(scores[1])
+        
+        assert auc_0 > 0.7
+        assert auc_1 > 0.7
+        assert abs(auc_0 - auc_1) < 0.3  # Similar performance
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
