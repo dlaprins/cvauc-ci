@@ -1,5 +1,5 @@
 """
-Influence curve computation for AUC confidence intervals.
+Influence curve computation for (cross-validated) AUC confidence intervals.
 
 This module implements the influence curve-based variance estimation from:
 
@@ -7,18 +7,15 @@ This module implements the influence curve-based variance estimation from:
     cross-validated area under the ROC curve estimates." Electronic Journal of
     Statistics, 9(1), 1583-1607 (https://pubmed.ncbi.nlm.nih.gov/26279737/). 
 
-Functions:
-    - _compute_influence_curve_single_fold() - IC computation per fold
-    - compute_variance() - Variance estimation from ICs
-    - compute_confidence_interval() - CI computation from variance
+and matches the R cvAUC package implementation by the paper's authors:
+www.github.com/ledell/cvAUC/
 """
 import numpy as np
 from scipy.stats import norm
 from sklearn.metrics import roc_auc_score
 
 
-# New: added functionality for influence curve computation from here on
-def _compute_influence_curve_single_fold(y_pred, y_true):
+def _compute_influence_curve_single_fold(y_pred, y_true, emp_prob_1_global=None, emp_prob_0_global=None):
     """Compute influence curves for all samples in a single fold.
     
     Vectorized implementation for efficiency.
@@ -31,10 +28,25 @@ def _compute_influence_curve_single_fold(y_pred, y_true):
     y_true : array-like of shape (n_samples,)
         True binary labels (0 or 1).
     
+    emp_prob_1_global : float, optional
+        Proportion of positive samples in the FULL dataset (Pn(Y=1)).
+        If None, computed from the fold (not recommended, for backward compatibility).
+    
+    emp_prob_0_global : float, optional
+        Proportion of negative samples in the FULL dataset (Pn(Y=0)).
+        If None, computed from the fold (not recommended, for backward compatibility).
+    
     Returns
     -------
     ic : ndarray of shape (n_samples,)
         Influence curve values for each sample.
+    
+    Notes
+    -----
+    Per LeDell et al. (2015), the empirical probabilities Pn(Y=1) and Pn(Y=0)
+    should be computed from the entire dataset, not the validation fold.
+    The ranking comparisons P(ψ<w|Y=0) and P(ψ>w|Y=1) are computed within
+    the validation fold.
     """
     n = len(y_true)
     y_true = np.asarray(y_true)
@@ -47,8 +59,10 @@ def _compute_influence_curve_single_fold(y_pred, y_true):
         # Cannot compute AUC with single class
         return np.zeros(n)
     
-    emp_prob_1 = n1 / n
-    emp_prob_0 = n0 / n
+    # Use global class proportions if provided, otherwise fall back to fold-local
+    # (fold-local is incorrect per the paper, but kept for backward compatibility)
+    emp_prob_1 = emp_prob_1_global if emp_prob_1_global is not None else (n1 / n)
+    emp_prob_0 = emp_prob_0_global if emp_prob_0_global is not None else (n0 / n)
     
     auc = roc_auc_score(y_true, y_pred)
     
@@ -72,19 +86,19 @@ def _compute_influence_curve_single_fold(y_pred, y_true):
     return ic
 
 
-def compute_variance(ic_all, V):
+def compute_variance(ic_all):
     """Compute variance of the AUC estimate from influence curves.
     
-    Following the paper's definition: variance = (1/Vn) * sum(IC_i^2)
-    This assumes mean of IC should be 0, so we don't subtract it.
+    
+    Note: we follow the R cvAUC package formula: variance = (1/n) * sum(IC_i^2).
+    The paper's equation 4.11 shows variance = (1/(V*n) * sum(IC_i^2).
+    The R implementation by the paper's authors uses (1/n) instead of (1/(V*n)),
+    which gives more conservative (wider) CIs that account for this correlation.
     
     Parameters
     ----------
     ic_all : array-like of shape (n_samples,)
         Influence curve values for all samples.
-    
-    V : int
-        Number of cross-validation folds.
     
     Returns
     -------
@@ -92,7 +106,7 @@ def compute_variance(ic_all, V):
         Variance estimate of the AUC.
     """
     n = len(ic_all)
-    variance = np.sum(ic_all ** 2) / (n * V)
+    variance = np.sum(ic_all ** 2) / n 
     return variance
 
 
@@ -101,6 +115,8 @@ def compute_confidence_interval(estimate, variance, n, confidence_level=0.95):
     
     CI = estimate +/- z * sigma / sqrt(n)
     where sigma = sqrt(variance) is the std of the influence curves.
+    
+    The CI is truncated to [0, 1].
     
     Parameters
     ----------
@@ -119,10 +135,11 @@ def compute_confidence_interval(estimate, variance, n, confidence_level=0.95):
     Returns
     -------
     conf_int : tuple of (float, float)
-        Lower and upper bounds of the confidence interval.
+        Lower and upper bounds of the confidence interval, truncated to [0, 1].
     """
     z_score = norm.ppf(0.5 + confidence_level / 2)
     bound = z_score * np.sqrt(variance) / np.sqrt(n)
-    conf_int = (estimate - bound, estimate + bound)
+    lower = max(0.0, estimate - bound)  # Truncate at 0
+    upper = min(1.0, estimate + bound)  # Truncate at 1
     
-    return conf_int
+    return (lower, upper)

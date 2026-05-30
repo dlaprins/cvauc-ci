@@ -13,10 +13,11 @@ The hand-calculated example (used in TestInfluenceCurveMath):
 - X = [[0], [1], [2], [3], [4], [5]] (indices as features)
 - 2-fold CV: fold 0 tests [0,1,2], fold 1 tests [3,4,5]
 - Mock estimator returns: y_pred = [0.6, 0.5, 0.4, 0.6, 0.3, 0.8]
+- Global class proportions: Pn(Y=1) = Pn(Y=0) = 0.5
 
-Fold 0: AUC=0.5, ICs=[-0.75, 0.0, 0.75]
+Fold 0: AUC=0.5, ICs=[-1.0, 0.0, 1.0] (using global proportions)
 Fold 1: AUC=1.0, ICs=[0.0, 0.0, 0.0]
-Combined: variance=0.09375, mean AUC=0.75, 95% CI~(0.505, 0.995)
+Combined: variance=1/3 (R-style, without /V), mean AUC=0.75
 """
 
 import numpy as np
@@ -93,22 +94,37 @@ class TestInfluenceCurveMath:
     """Unit tests for influence curve computation functions."""
     
     def test_compute_influence_curve_fold0(self):
-        """Test IC computation for fold 0 (AUC=0.5)."""
+        """Test IC computation for fold 0 (AUC=0.5) with global proportions."""
         y_pred = np.array([0.6, 0.5, 0.4])
         y_true = np.array([0, 1, 0])
+        # Global proportions from full dataset (3 pos, 3 neg out of 6)
+        emp_prob_1_global = 0.5
+        emp_prob_0_global = 0.5
         
-        ic = _compute_influence_curve_single_fold(y_pred, y_true)
+        ic = _compute_influence_curve_single_fold(
+            y_pred, y_true, emp_prob_1_global, emp_prob_0_global
+        )
         
-        expected_ic = np.array([-0.75, 0.0, 0.75])
+        # With global proportions: IC = (p - AUC) / 0.5 = 2 * (p - AUC)
+        # Sample 0 (Y=0): p0 = P(ψ>0.6|Y=1) = 0/1 = 0, IC = (0-0.5)/0.5 = -1.0
+        # Sample 1 (Y=1): p1 = P(ψ<0.5|Y=0) = 1/2 = 0.5, IC = (0.5-0.5)/0.5 = 0.0
+        # Sample 2 (Y=0): p0 = P(ψ>0.4|Y=1) = 1/1 = 1, IC = (1-0.5)/0.5 = 1.0
+        expected_ic = np.array([-1.0, 0.0, 1.0])
         np.testing.assert_array_almost_equal(ic, expected_ic, decimal=10)
     
     def test_compute_influence_curve_fold1(self):
-        """Test IC computation for fold 1 (perfect AUC=1.0)."""
+        """Test IC computation for fold 1 (perfect AUC=1.0) with global proportions."""
         y_pred = np.array([0.6, 0.3, 0.8])
         y_true = np.array([1, 0, 1])
+        # Global proportions from full dataset (3 pos, 3 neg out of 6)
+        emp_prob_1_global = 0.5
+        emp_prob_0_global = 0.5
         
-        ic = _compute_influence_curve_single_fold(y_pred, y_true)
+        ic = _compute_influence_curve_single_fold(
+            y_pred, y_true, emp_prob_1_global, emp_prob_0_global
+        )
         
+        # With AUC=1.0, all ICs are 0 since p - AUC = 1 - 1 = 0
         expected_ic = np.array([0.0, 0.0, 0.0])
         np.testing.assert_array_almost_equal(ic, expected_ic, decimal=10)
     
@@ -122,28 +138,33 @@ class TestInfluenceCurveMath:
         np.testing.assert_array_equal(ic, np.zeros(3))
     
     def test_compute_variance(self):
-        """Test variance computation from ICs."""
-        ic_all = np.array([-0.75, 0.0, 0.75, 0.0, 0.0, 0.0])
+        """Test variance computation from ICs (R-style formula)."""
+        # ICs with global proportions: [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+        ic_all = np.array([-1.0, 0.0, 1.0, 0.0, 0.0, 0.0])
         V = 2
         
         variance = compute_variance(ic_all, V)
         
-        # variance = sum(IC^2) / (n * V) = 1.125 / 12 = 0.09375
-        assert abs(variance - 0.09375) < 1e-10
+        # R-style variance = sum(IC^2) / n = 2/6 = 1/3
+        # (Note: paper formula would be 2/12 = 1/6, but R doesn't divide by V)
+        expected_variance = 2.0 / 6.0  # = 1/3 ≈ 0.3333
+        assert abs(variance - expected_variance) < 1e-10
     
     def test_compute_confidence_interval(self):
         """Test CI computation from variance."""
         estimate = 0.75
-        variance = 0.09375
+        variance = 1.0 / 3.0  # R-style variance (without /V)
         n = 6
         
         ci = compute_confidence_interval(estimate, variance, n, confidence_level=0.95)
         
-        expected_bound = 1.96 * np.sqrt(0.09375) / np.sqrt(6)
-        expected_ci = (0.75 - expected_bound, 0.75 + expected_bound)
+        expected_bound = 1.96 * np.sqrt(variance) / np.sqrt(n)
+        # CI is truncated to [0, 1] to match R's cvAUC package
+        expected_lower = max(0.0, 0.75 - expected_bound)
+        expected_upper = min(1.0, 0.75 + expected_bound)
         
-        assert abs(ci[0] - expected_ci[0]) < 1e-5
-        assert abs(ci[1] - expected_ci[1]) < 1e-5
+        assert abs(ci[0] - expected_lower) < 1e-5
+        assert abs(ci[1] - expected_upper) < 1e-5
     
     def test_compute_confidence_interval_different_levels(self):
         """Test CI at different confidence levels."""
@@ -186,10 +207,15 @@ class TestCrossValAUCPipeline:
         # Verify fold AUCs
         np.testing.assert_array_almost_equal(scores, [0.5, 1.0], decimal=10)
         
-        # Verify confidence interval
-        expected_bound = 1.96 * np.sqrt(0.09375) / np.sqrt(6)
-        assert abs(conf_int[0] - (0.75 - expected_bound)) < 1e-4
-        assert abs(conf_int[1] - (0.75 + expected_bound)) < 1e-4
+        # Verify confidence interval with R-style variance (no division by V)
+        # variance = 2/6 = 1/3 (R-style, matches cvAUC package)
+        # CI is truncated to [0, 1]
+        expected_variance = 1.0 / 3.0
+        expected_bound = 1.96 * np.sqrt(expected_variance) / np.sqrt(6)
+        expected_lower = max(0.0, 0.75 - expected_bound)
+        expected_upper = min(1.0, 0.75 + expected_bound)
+        assert abs(conf_int[0] - expected_lower) < 1e-4
+        assert abs(conf_int[1] - expected_upper) < 1e-4
     
     def test_no_confidence_interval(self, hand_calculated_example):
         """Test cross_val_auc without CI computation."""

@@ -656,6 +656,13 @@ def _fit_and_score(
             influence_curve = None
             influence_curve_indices = None
             
+            # Compute global class proportions from the FULL dataset (Pn)
+            # Per LeDell et al. (2015), these should NOT be fold-local
+            y_full = y if not hasattr(y, 'values') else y.values
+            n_total = len(y_full)
+            emp_prob_1_global = np.sum(y_full == 1) / n_total
+            emp_prob_0_global = np.sum(y_full == 0) / n_total
+            
             if hasattr(estimator, "predict_proba"):
                 try:
                     if eval_categories is None:
@@ -670,7 +677,9 @@ def _fit_and_score(
                         y_pred_np = _convert_to_numpy(y_pred, xp=np)
                         test_np = _convert_to_numpy(test, xp=np)
                         
-                        influence_curve = _compute_influence_curve_single_fold(y_pred_np, y_test_np)
+                        influence_curve = _compute_influence_curve_single_fold(
+                            y_pred_np, y_test_np, emp_prob_1_global, emp_prob_0_global
+                        )
                         influence_curve_indices = test_np
                     else:
                         # Compute ICs per category
@@ -696,7 +705,9 @@ def _fit_and_score(
                             y_pred_cat_np = _convert_to_numpy(y_pred_cat, xp=np)
                             test_cat_np = _convert_to_numpy(test_cat, xp=np)
                             
-                            ic_cat = _compute_influence_curve_single_fold(y_pred_cat_np, y_test_cat_np)
+                            ic_cat = _compute_influence_curve_single_fold(
+                                y_pred_cat_np, y_test_cat_np, emp_prob_1_global, emp_prob_0_global
+                            )
                             
                             if isinstance(scorer, _MultimetricScorer):
                                 metric_name = list(scorer._scorers.keys())[0]
