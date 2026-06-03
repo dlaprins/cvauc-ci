@@ -6,7 +6,8 @@ Implementation of the algorithm described in
     cross-validated area under the ROC curve estimates." Electronic Journal of
     Statistics, 9(1), 1583-1607 (https://pubmed.ncbi.nlm.nih.gov/26279737/).
 
-The code is a modification of sklearn's cross_val_score() (v1.7.2). Main API is cvauc.py's cross_val_auc() function.
+The code is a modification of sklearn's cross_val_score() (v1.7.2). Main API is cvauc.py's cross_val_auc() function. See also the author's  
+R code at https://github.com/ledell/cvAUC.
 
 For a primer on influence curves, see e.g.
     Hampel et al. (1986/2011). "Robust Statistics: The Approach Based on Influence Functions." Wiley. DOI:10.1002/9781118186435
