@@ -4,7 +4,7 @@ Cross-validated AUC with influence curve-based confidence intervals.
 This module extends sklearn's cross_validate and _fit_and_score functions
 to compute influence curve-based confidence intervals for AUC, following:
 
-    LeDell et al. (2015). "Computationally efficient confidence intervals for 
+    LeDell et al. (2015). "Computationally efficient confidence intervals for
     cross-validated area under the ROC curve estimates." Electronic Journal of
     Statistics, 9(1), 1583-1607.
 
@@ -13,14 +13,14 @@ In addition, functionality is added for evaluating model performance on subsegme
 
 Usage:
     from cvauc import cross_val_auc
-    
+
     scores, conf_int = cross_val_auc(
         estimator, X, y,
         scoring='roc_auc',
         cv=5,
         confidence_level=0.95
     )
-    
+
     # Evaluate on subgroups (X must be a DataFrame with a categorical column):
     scores, conf_int = cross_val_auc(
         estimator, X, y,
@@ -39,9 +39,10 @@ Note: cross_validate() and _fit_and_score() are based on sklearn 1.7.2. If sklea
 internal APIs change in future versions, this code may need to be updated.
 
 New functions:
-    - cross_val_auc() - Main API for AUC with confidence intervals. Modification of 
+    - cross_val_auc() - Main API for AUC with confidence intervals. Modification of
     sklearn's cross_val_score() with added parameters for CI and category-specific evaluation.
 """
+
 import numbers
 import time
 import warnings
@@ -79,11 +80,11 @@ from sklearn.utils.validation import _check_method_params, _num_samples
 from influence_curves import (
     _compute_influence_curve_single_fold,
     compute_variance,
-    compute_confidence_interval
+    compute_confidence_interval,
 )
 
 
-# New: main API for usage. 
+# New: main API for usage.
 # Equivalent to cross_val_score but returns AUC scores and influence curves for CI computation.
 def cross_val_auc(
     estimator,
@@ -198,28 +199,28 @@ def cross_val_auc(
         If a numeric value is given, FitFailedWarning is raised.
 
         .. versionadded:: 0.20
-    
+
     eval_subset : tuple or None, default=None
         Evaluate model performance on categorical subsets of test data while
         training on the full dataset.
-        
+
         - If None (default): evaluate on full test set (standard behavior)
-        - If ('column_name', 'category_value'): evaluate only on test samples 
+        - If ('column_name', 'category_value'): evaluate only on test samples
           where X[column_name] == category_value
-        - If ('column_name', None): evaluate separately for each unique value 
+        - If ('column_name', None): evaluate separately for each unique value
           in X[column_name]
-        
+
         Note: The categorical column is automatically excluded from model training
         and prediction. It is used only for filtering test data, ensuring the
         model cannot learn from it.
-        
+
         Requirements:
-        
+
         - X must be a pandas DataFrame
         - Category values must be hashable (strings, numbers, tuples)
-        
+
         Return format when eval_subset is used:
-        
+
         - scores: dict mapping category -> array
         - conf_int: dict mapping 'score_category' -> (lower, upper)
 
@@ -261,12 +262,12 @@ def cross_val_auc(
         col_name, col_value = eval_subset
         if col_name not in X.columns:
             raise ValueError(f"Column '{col_name}' not found in DataFrame")
-    
+
     # To ensure multimetric format is not supported
     scorer = check_scoring(estimator, scoring=scoring)
 
     # Determine if we need influence curves for confidence intervals
-    compute_ic = confidence_level is not None and scoring == 'roc_auc'
+    compute_ic = confidence_level is not None and scoring == "roc_auc"
 
     cv_results = cross_validate(
         estimator=estimator,
@@ -281,9 +282,10 @@ def cross_val_auc(
         pre_dispatch=pre_dispatch,
         error_score=error_score,
         return_estimator=False,  # Don't need estimators anymore
-        return_indices=False,     # Don't need indices anymore
+        return_indices=False,  # Don't need indices anymore
         return_influence_curves=compute_ic,  # NEW: compute ICs in the loop
         eval_subset=eval_subset,  # NEW: category-specific evaluation
+        manual_roc_auc=scoring == "roc_auc",  # Avoid scorer tag edge-cases
     )
 
     conf_int = None
@@ -292,7 +294,7 @@ def cross_val_auc(
         X, y = indexable(X, y)
         n = len(y)
         ic_all = cv_results["influence_curves"]
-        
+
         if isinstance(ic_all, dict):
             # Multi-category: compute CI per category
             conf_int = {}
@@ -301,18 +303,20 @@ def cross_val_auc(
                 test_key = f"test_{cat_key}"
                 if test_key in cv_results:
                     test_scores_cat = cv_results[test_key]
-                    V = len(test_scores_cat)
-                    variance = compute_variance(ic_cat, V)
+                    # V = len(test_scores_cat)
+                    variance = compute_variance(ic_cat)
                     estimate = np.mean(test_scores_cat)
                     conf_int[cat_key] = compute_confidence_interval(
                         estimate, variance, n, confidence_level
                     )
         else:
             # Single or no eval_subset
-            V = len(cv_results["test_score"])  # number of folds
-            variance = compute_variance(ic_all, V)
+            # V = len(cv_results["test_score"])  # number of folds
+            variance = compute_variance(ic_all)
             estimate = np.mean(cv_results["test_score"])
-            conf_int = compute_confidence_interval(estimate, variance, n, confidence_level)
+            conf_int = compute_confidence_interval(
+                estimate, variance, n, confidence_level
+            )
 
     # Return scores based on eval_subset mode
     if eval_subset is None:
@@ -321,7 +325,7 @@ def cross_val_auc(
         # Return dict of scores per category
         # We need to reconstruct the original category values (preserving their types)
         col_name, col_value = eval_subset
-        
+
         # Determine which categories were evaluated
         if col_value is None:
             # All categories - get unique values from X with original types
@@ -329,7 +333,7 @@ def cross_val_auc(
         else:
             # Single category with original type
             categories = [col_value]
-        
+
         scores_dict = {}
         for category in categories:
             # Look for the corresponding key in cv_results
@@ -338,9 +342,9 @@ def cross_val_auc(
             if key in cv_results:
                 # Store with original category type as key
                 scores_dict[category] = cv_results[key]
-        
+
         return scores_dict, conf_int
-    
+
 
 def cross_validate(
     estimator,
@@ -360,13 +364,14 @@ def cross_validate(
     error_score=np.nan,
     return_influence_curves=False,  # NEW: for AUC confidence intervals
     eval_subset=None,  # NEW: for category-specific evaluation
+    manual_roc_auc=False,
 ):
     """Evaluate metric(s) by cross-validation and also record fit/score times.
-    
+
     This is sklearn's cross_validate with two additions:
     - return_influence_curves: compute influence curves for CI estimation
     - eval_subset: evaluate on categorical subsets of test data
-    
+
     See sklearn.model_selection.cross_validate for full documentation.
     """
     _check_groups_routing_disabled(groups)
@@ -430,6 +435,7 @@ def cross_validate(
             error_score=error_score,
             return_influence_curves=return_influence_curves,  # NEW
             eval_subset=eval_subset,  # NEW
+            manual_roc_auc=manual_roc_auc,
         )
         for train, test in indices
     )
@@ -461,27 +467,30 @@ def cross_validate(
         if return_train_score:
             key = "train_%s" % name
             ret[key] = train_scores_dict[name]
-    
+
     # NEW: Aggregate influence curves if requested
     if return_influence_curves:
         if "influence_curve" in results and results["influence_curve"]:
             first_ic = results["influence_curve"][0]
-            
+
             if isinstance(first_ic, dict):
                 # Multi-category: aggregate per category
                 n_samples = len(y) if y is not None else X.shape[0]
                 categories = first_ic.keys()
                 ic_all = {cat: np.zeros(n_samples) for cat in categories}
-                
+
                 ic_indices = results["influence_curve_indices"]
                 ics = results["influence_curve"]
-                
+
                 for ic_dict, indices_dict in zip(ics, ic_indices):
                     if ic_dict is not None and indices_dict is not None:
                         for cat in categories:
-                            if ic_dict[cat] is not None and indices_dict[cat] is not None:
+                            if (
+                                ic_dict[cat] is not None
+                                and indices_dict[cat] is not None
+                            ):
                                 ic_all[cat][indices_dict[cat]] = ic_dict[cat]
-                
+
                 ret["influence_curves"] = ic_all
             else:
                 # Single category or no eval_subset
@@ -489,11 +498,11 @@ def cross_validate(
                 ic_all = np.zeros(n_samples)
                 ic_indices = results["influence_curve_indices"]
                 ics = results["influence_curve"]
-                
+
                 for ic, indices_fold in zip(ics, ic_indices):
                     if ic is not None and indices_fold is not None:
                         ic_all[indices_fold] = ic
-                
+
                 ret["influence_curves"] = ic_all
 
     return ret
@@ -521,13 +530,14 @@ def _fit_and_score(
     error_score=np.nan,
     return_influence_curves=False,  # NEW
     eval_subset=None,  # NEW
+    manual_roc_auc=False,
 ):
     """Fit estimator and compute scores for a given dataset split.
-    
+
     This is sklearn's _fit_and_score with two additions:
     - return_influence_curves: compute influence curves for AUC CI
     - eval_subset: evaluate on categorical subsets, excluding cat column from model
-    
+
     See sklearn.model_selection._validation._fit_and_score for full documentation.
     """
     xp, _ = get_namespace(X)
@@ -579,7 +589,7 @@ def _fit_and_score(
     X_test_for_pred = X_test
     if eval_subset is not None:
         cat_col_name, _ = eval_subset
-        if hasattr(X_train, 'drop'):  # DataFrame
+        if hasattr(X_train, "drop"):  # DataFrame
             X_train_for_fit = X_train.drop(columns=[cat_col_name])
             X_test_for_pred = X_test.drop(columns=[cat_col_name])
         else:
@@ -611,7 +621,7 @@ def _fit_and_score(
         result["fit_error"] = None
 
         fit_time = time.time() - start_time
-        
+
         # NEW: Determine categories to evaluate
         eval_categories = None
         col_name = None
@@ -621,62 +631,129 @@ def _fit_and_score(
                 eval_categories = sorted(X_test[col_name].unique())
             else:
                 eval_categories = [col_value]
-        
+
+        def _manual_roc_auc_score(X_score, y_score_true):
+            if y_score_true is None:
+                raise ValueError("roc_auc scoring requires y_true")
+
+            if hasattr(estimator, "predict_proba"):
+                y_score = estimator.predict_proba(X_score)
+                if np.ndim(y_score) == 2:
+                    y_score = y_score[:, 1] if y_score.shape[1] == 2 else y_score[:, -1]
+            elif hasattr(estimator, "decision_function"):
+                y_score = estimator.decision_function(X_score)
+            else:
+                y_score = estimator.predict(X_score)
+
+            y_true_np = _convert_to_numpy(y_score_true, xp=np)
+            y_score_np = _convert_to_numpy(y_score, xp=np)
+
+            try:
+                return float(roc_auc_score(y_true_np, y_score_np))
+            except Exception:
+                if error_score == "raise":
+                    raise
+                if isinstance(error_score, numbers.Number):
+                    return float(error_score)
+                raise
+
         # Score on test set
-        if eval_categories is None:
-            test_scores = _score(
-                estimator, X_test_for_pred, y_test, scorer, score_params_test, error_score
-            )
+        if manual_roc_auc:
+            if eval_categories is None:
+                test_scores = {"score": _manual_roc_auc_score(X_test_for_pred, y_test)}
+            else:
+                test_scores = {}
+                for category in eval_categories:
+                    mask = X_test[col_name] == category
+                    mask_np = mask.values if hasattr(mask, "values") else mask
+                    X_test_cat = X_test_for_pred[mask_np]
+                    y_test_cat = (
+                        y_test[mask_np]
+                        if hasattr(y_test, "__getitem__")
+                        else y_test[mask_np]
+                    )
+                    test_scores[f"score_{category}"] = _manual_roc_auc_score(
+                        X_test_cat, y_test_cat
+                    )
         else:
-            # NEW: Score each category separately
-            test_scores = {}
-            for category in eval_categories:
-                mask = X_test[col_name] == category
-                mask_np = mask.values if hasattr(mask, 'values') else mask
-                X_test_cat = X_test_for_pred[mask_np]
-                y_test_cat = y_test[mask_np] if hasattr(y_test, '__getitem__') else y_test[mask_np]
-                
-                score_cat = _score(
-                    estimator, X_test_cat, y_test_cat, scorer, score_params_test, error_score
+            if eval_categories is None:
+                test_scores = _score(
+                    estimator,
+                    X_test_for_pred,
+                    y_test,
+                    scorer,
+                    score_params_test,
+                    error_score,
                 )
-                if isinstance(score_cat, dict):
-                    for metric_name, metric_value in score_cat.items():
-                        test_scores[f"{metric_name}_{category}"] = metric_value
-                else:
-                    test_scores[category] = score_cat
-        
+            else:
+                # NEW: Score each category separately
+                test_scores = {}
+                for category in eval_categories:
+                    mask = X_test[col_name] == category
+                    mask_np = mask.values if hasattr(mask, "values") else mask
+                    X_test_cat = X_test_for_pred[mask_np]
+                    y_test_cat = (
+                        y_test[mask_np]
+                        if hasattr(y_test, "__getitem__")
+                        else y_test[mask_np]
+                    )
+
+                    score_cat = _score(
+                        estimator,
+                        X_test_cat,
+                        y_test_cat,
+                        scorer,
+                        score_params_test,
+                        error_score,
+                    )
+                    if isinstance(score_cat, dict):
+                        for metric_name, metric_value in score_cat.items():
+                            test_scores[f"{metric_name}_{category}"] = metric_value
+                    else:
+                        test_scores[category] = score_cat
+
         score_time = time.time() - start_time - fit_time
         if return_train_score:
-            train_scores = _score(
-                estimator, X_train_for_fit, y_train, scorer, score_params_train, error_score
-            )
-        
+            if manual_roc_auc:
+                train_scores = {
+                    "score": _manual_roc_auc_score(X_train_for_fit, y_train)
+                }
+            else:
+                train_scores = _score(
+                    estimator,
+                    X_train_for_fit,
+                    y_train,
+                    scorer,
+                    score_params_train,
+                    error_score,
+                )
+
         # NEW: Compute influence curves if requested
         if return_influence_curves:
             influence_curve = None
             influence_curve_indices = None
-            
+
             # Compute global class proportions from the FULL dataset (Pn)
             # Per LeDell et al. (2015), these should NOT be fold-local
-            y_full = y if not hasattr(y, 'values') else y.values
+            y_full = y if not hasattr(y, "values") else y.values
             n_total = len(y_full)
             emp_prob_1_global = np.sum(y_full == 1) / n_total
             emp_prob_0_global = np.sum(y_full == 0) / n_total
-            
+
             if hasattr(estimator, "predict_proba"):
                 try:
                     if eval_categories is None:
                         y_pred_proba = estimator.predict_proba(X_test_for_pred)
-                        
+
                         if y_pred_proba.shape[1] == 2:
                             y_pred = y_pred_proba[:, 1]
                         else:
                             y_pred = y_pred_proba[:, -1]
-                        
+
                         y_test_np = _convert_to_numpy(y_test, xp=np)
                         y_pred_np = _convert_to_numpy(y_pred, xp=np)
                         test_np = _convert_to_numpy(test, xp=np)
-                        
+
                         influence_curve = _compute_influence_curve_single_fold(
                             y_pred_np, y_test_np, emp_prob_1_global, emp_prob_0_global
                         )
@@ -685,42 +762,51 @@ def _fit_and_score(
                         # Compute ICs per category
                         influence_curve = {}
                         influence_curve_indices = {}
-                        
+
                         for category in eval_categories:
                             mask = X_test[col_name] == category
-                            mask_np = mask.values if hasattr(mask, 'values') else np.asarray(mask)
-                            
+                            mask_np = (
+                                mask.values
+                                if hasattr(mask, "values")
+                                else np.asarray(mask)
+                            )
+
                             X_test_cat = X_test_for_pred[mask_np]
                             y_test_cat = y_test[mask_np]
                             test_cat = test[mask_np]
-                            
+
                             y_pred_proba_cat = estimator.predict_proba(X_test_cat)
-                            
+
                             if y_pred_proba_cat.shape[1] == 2:
                                 y_pred_cat = y_pred_proba_cat[:, 1]
                             else:
                                 y_pred_cat = y_pred_proba_cat[:, -1]
-                            
+
                             y_test_cat_np = _convert_to_numpy(y_test_cat, xp=np)
                             y_pred_cat_np = _convert_to_numpy(y_pred_cat, xp=np)
                             test_cat_np = _convert_to_numpy(test_cat, xp=np)
-                            
+
                             ic_cat = _compute_influence_curve_single_fold(
-                                y_pred_cat_np, y_test_cat_np, emp_prob_1_global, emp_prob_0_global
+                                y_pred_cat_np,
+                                y_test_cat_np,
+                                emp_prob_1_global,
+                                emp_prob_0_global,
                             )
-                            
+
                             if isinstance(scorer, _MultimetricScorer):
                                 metric_name = list(scorer._scorers.keys())[0]
                                 key = f"{metric_name}_{category}"
                             else:
                                 key = category
-                            
+
                             influence_curve[key] = ic_cat
                             influence_curve_indices[key] = test_cat_np
-                            
+
                 except Exception as e:
-                    warnings.warn(f"Influence curve computation failed: {e}", RuntimeWarning)
-            
+                    warnings.warn(
+                        f"Influence curve computation failed: {e}", RuntimeWarning
+                    )
+
             result["influence_curve"] = influence_curve
             result["influence_curve_indices"] = influence_curve_indices
 

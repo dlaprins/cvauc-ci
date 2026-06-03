@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cvauc-ci"
+version = "0.1.0"
+description = "Confidence intervals for cross-validated AUC using influence curves"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "cvauc-ci contributors" }]
+dependencies = [
+  "numpy>=1.21.0",
+  "pandas>=1.3.0",
+  "scikit-learn>=1.5.0",
+  "scipy>=1.7.0",
+  "joblib>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0.0",
+  "pre-commit>=3.0.0",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src/cvauc_ci" }
+py-modules = ["cvauc", "influence_curves"]
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "src/cvauc_ci",
+]

@@ -1,20 +1,27 @@
 # cvauc-ci
-Confidence-intervals for cross-validated AUC scores based on influence curves. 
+Confidence-intervals for cross-validated AUC scores based on influence curves.
 
-Implementation of the algorithm described in 
-     LeDell et al. (2015). "Computationally efficient confidence intervals for 
+Implementation of the algorithm described in
+     LeDell et al. (2015). "Computationally efficient confidence intervals for
     cross-validated area under the ROC curve estimates." Electronic Journal of
     Statistics, 9(1), 1583-1607 (https://pubmed.ncbi.nlm.nih.gov/26279737/).
 
-The code is a modification of sklearn's cross_val_score() (v1.7.2). Main API is cvauc.py's cross_val_auc() function. 
+The code is a modification of sklearn's cross_val_score() (v1.7.2). Main API is cvauc.py's cross_val_auc() function.
 
-For a primer on influence curves, see e.g. 
+For a primer on influence curves, see e.g.
     Hampel et al. (1986/2011). "Robust Statistics: The Approach Based on Influence Functions." Wiley. DOI:10.1002/9781118186435
 
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+uv sync
+```
+
+For development:
+
+```bash
+uv sync --extra dev
+uv run pre-commit install
 ```
 
 ## Usage
@@ -45,4 +52,3 @@ LeDell E, Petersen M, van der Laan M (2015). "Computationally efficient confiden
 ## Note
 
 The `cross_validate()` and `_fit_and_score()` functions are modified from scikit-learn 1.7.2. Requires scikit-learn >= 1.5.0.
-
