@@ -16,10 +16,8 @@ from scipy.stats import norm
 from sklearn.metrics import roc_auc_score
 
 
-def _compute_influence_curve_single_fold(
-    y_pred, y_true, emp_prob_1_global=None, emp_prob_0_global=None
-):
-    """Compute influence curves for all samples in a single fold.
+def compute_auc_influence_curve(y_pred, y_true):
+    """Compute influence curves for all samples in a single validation fold/test set.
 
     Vectorized implementation for efficiency.
 
@@ -30,14 +28,6 @@ def _compute_influence_curve_single_fold(
 
     y_true : array-like of shape (n_samples,)
         True binary labels (0 or 1).
-
-    emp_prob_1_global : float, optional
-        Proportion of positive samples in the FULL dataset (Pn(Y=1)).
-        If None, computed from the fold (not recommended, for backward compatibility).
-
-    emp_prob_0_global : float, optional
-        Proportion of negative samples in the FULL dataset (Pn(Y=0)).
-        If None, computed from the fold (not recommended, for backward compatibility).
 
     Returns
     -------
@@ -51,10 +41,10 @@ def _compute_influence_curve_single_fold(
     The ranking comparisons P(ψ<w|Y=0) and P(ψ>w|Y=1) are computed within
     the validation fold.
     """
-    n = len(y_true)
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
 
+    n = len(y_true)
     n1 = np.sum(y_true == 1)
     n0 = np.sum(y_true == 0)
 
@@ -62,10 +52,10 @@ def _compute_influence_curve_single_fold(
         # Cannot compute AUC with single class
         return np.zeros(n)
 
-    # Use global class proportions if provided, otherwise fall back to fold-local
-    # (fold-local is incorrect per the paper, but kept for backward compatibility)
-    emp_prob_1 = emp_prob_1_global if emp_prob_1_global is not None else (n1 / n)
-    emp_prob_0 = emp_prob_0_global if emp_prob_0_global is not None else (n0 / n)
+    # Use class proportions of the test set.
+    # For CVAUC, these are fold-local, which is incorrect per the paper; correction is done in cross_validate().
+    emp_prob_1 = n1 / n
+    emp_prob_0 = n0 / n
 
     auc = roc_auc_score(y_true, y_pred)
 
@@ -85,7 +75,9 @@ def _compute_influence_curve_single_fold(
     return ic
 
 
-def compute_variance(ic_all, V=None):
+# TODO: implement fold weights properly. Currently: IC curves are weighted by fold weights, variance is computed without fold weights.
+# TODO: Fix1: add fold weights if use_fold_weights=True
+def compute_variance(ic_all):
     """Compute variance of the AUC estimate from influence curves.
 
 
@@ -99,9 +91,9 @@ def compute_variance(ic_all, V=None):
     ic_all : array-like of shape (n_samples,)
         Influence curve values for all samples.
 
-    V : int, optional
-        Number of folds. Accepted for backward compatibility with older call
-        sites; ignored in the computation.
+    use_fold_weights : bool
+        Whether to use fold weights. Useful for folds of different sizes.
+        LeDell et al. (2015) do not use fold weights, and the R cvAUC package does not implement fold weights.
 
     Returns
     -------
@@ -146,3 +138,45 @@ def compute_confidence_interval(estimate, variance, n, confidence_level=0.95):
     upper = min(1.0, estimate + bound)  # Truncate at 1
 
     return (lower, upper)
+
+
+# def _compute_fold_weights(y_true, fold_sizes):
+#     """Compute fold weights for influence curve aggregation.
+
+#     Per LeDell et al. (2015), fold weights are defined by total sample distribution, not fold-local distribution.
+#     This requires correcting generic test set weights by the ratio of global to fold-local class proportions.
+
+#     Parameters
+#     ----------
+#     fold_sizes : list of int
+#         List of sample sizes for each fold.
+
+#     Returns
+#     -------
+#     fold_weights : list of float
+#         List of fold weights for influence curve aggregation.
+#     """
+#     n_global = len(y_true)
+#     fold_weights = n_global / (np.array(fold_sizes) * len(fold_sizes))  # V is number of folds
+#     return fold_weights
+
+
+def _compute_global_weights(y_global, y_test):
+    """Construct sample weights.
+
+    Per LeDell et al. (2015), weights for folds are defined by total sample distribution, not fold-local distribution.
+    This requires correcting generic test set weights by the ratio of global to fold-local class proportions.
+    """
+    emp_prob_1_global = np.mean(y_global)
+    emp_prob_0_global = 1 - emp_prob_1_global
+
+    emp_prob_1_fold = np.mean(y_test)
+    emp_prob_0_fold = 1 - emp_prob_1_fold
+
+    weight_0 = emp_prob_0_fold / emp_prob_0_global if emp_prob_0_fold > 0 else 0
+    weight_1 = emp_prob_1_fold / emp_prob_1_global if emp_prob_1_fold > 0 else 0
+
+    # Construct weights array
+    weights = np.where(y_test == 1, weight_1, weight_0)
+
+    return weights

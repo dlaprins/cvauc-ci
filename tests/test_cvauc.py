@@ -27,9 +27,9 @@ from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import KFold
 
-from cvauc import (
+from cvauc_ci import (
     cross_val_auc,
-    _compute_influence_curve_single_fold,
+    compute_auc_influence_curve,
     compute_variance,
     compute_confidence_interval,
 )
@@ -98,35 +98,23 @@ class TestInfluenceCurveMath:
     """Unit tests for influence curve computation functions."""
 
     def test_compute_influence_curve_fold0(self):
-        """Test IC computation for fold 0 (AUC=0.5) with global proportions."""
+        """Test IC computation for fold 0 (AUC=0.5) with fold-local proportions."""
         y_pred = np.array([0.6, 0.5, 0.4])
         y_true = np.array([0, 1, 0])
-        # Global proportions from full dataset (3 pos, 3 neg out of 6)
-        emp_prob_1_global = 0.5
-        emp_prob_0_global = 0.5
+        ic = compute_auc_influence_curve(y_pred, y_true)
 
-        ic = _compute_influence_curve_single_fold(
-            y_pred, y_true, emp_prob_1_global, emp_prob_0_global
-        )
-
-        # With global proportions: IC = (p - AUC) / 0.5 = 2 * (p - AUC)
-        # Sample 0 (Y=0): p0 = P(ψ>0.6|Y=1) = 0/1 = 0, IC = (0-0.5)/0.5 = -1.0
-        # Sample 1 (Y=1): p1 = P(ψ<0.5|Y=0) = 1/2 = 0.5, IC = (0.5-0.5)/0.5 = 0.0
-        # Sample 2 (Y=0): p0 = P(ψ>0.4|Y=1) = 1/1 = 1, IC = (1-0.5)/0.5 = 1.0
-        expected_ic = np.array([-1.0, 0.0, 1.0])
+        # With fold-local proportions: P(Y=1)=1/3 and P(Y=0)=2/3.
+        # Sample 0 (Y=0): p0 = 0, IC = (0-0.5)/(2/3) = -0.75
+        # Sample 1 (Y=1): p1 = 0.5, IC = (0.5-0.5)/(1/3) = 0.0
+        # Sample 2 (Y=0): p0 = 1, IC = (1-0.5)/(2/3) = 0.75
+        expected_ic = np.array([-0.75, 0.0, 0.75])
         np.testing.assert_array_almost_equal(ic, expected_ic, decimal=10)
 
     def test_compute_influence_curve_fold1(self):
         """Test IC computation for fold 1 (perfect AUC=1.0) with global proportions."""
         y_pred = np.array([0.6, 0.3, 0.8])
         y_true = np.array([1, 0, 1])
-        # Global proportions from full dataset (3 pos, 3 neg out of 6)
-        emp_prob_1_global = 0.5
-        emp_prob_0_global = 0.5
-
-        ic = _compute_influence_curve_single_fold(
-            y_pred, y_true, emp_prob_1_global, emp_prob_0_global
-        )
+        ic = compute_auc_influence_curve(y_pred, y_true)
 
         # With AUC=1.0, all ICs are 0 since p - AUC = 1 - 1 = 0
         expected_ic = np.array([0.0, 0.0, 0.0])
@@ -137,7 +125,7 @@ class TestInfluenceCurveMath:
         y_pred = np.array([0.6, 0.5, 0.4])
         y_true = np.array([1, 1, 1])  # All positive
 
-        ic = _compute_influence_curve_single_fold(y_pred, y_true)
+        ic = compute_auc_influence_curve(y_pred, y_true)
 
         np.testing.assert_array_equal(ic, np.zeros(3))
 
@@ -145,9 +133,8 @@ class TestInfluenceCurveMath:
         """Test variance computation from ICs (R-style formula)."""
         # ICs with global proportions: [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0]
         ic_all = np.array([-1.0, 0.0, 1.0, 0.0, 0.0, 0.0])
-        V = 2
 
-        variance = compute_variance(ic_all, V)
+        variance = compute_variance(ic_all)
 
         # R-style variance = sum(IC^2) / n = 2/6 = 1/3
         # (Note: paper formula would be 2/12 = 1/6, but R doesn't divide by V)
@@ -208,12 +195,10 @@ class TestCrossValAUCPipeline:
         clf = MockClassifier(pred_proba_map)
         cv = KFold(n_splits=2, shuffle=False)
 
-        scores, conf_int = cross_val_auc(
-            clf, X, y, scoring="roc_auc", cv=cv, confidence_level=0.95
-        )
+        scores, conf_int = cross_val_auc(clf, X, y, cv=cv, confidence_level=0.95)
 
         # Verify fold AUCs
-        np.testing.assert_array_almost_equal(scores, [0.5, 1.0], decimal=10)
+        np.testing.assert_array_almost_equal(np.asarray(scores), [0.5, 1.0], decimal=10)
 
         # Verify confidence interval with R-style variance (no division by V)
         # variance = 2/6 = 1/3 (R-style, matches cvAUC package)
@@ -222,6 +207,7 @@ class TestCrossValAUCPipeline:
         expected_bound = 1.96 * np.sqrt(expected_variance) / np.sqrt(6)
         expected_lower = max(0.0, 0.75 - expected_bound)
         expected_upper = min(1.0, 0.75 + expected_bound)
+        assert conf_int is not None
         assert abs(conf_int[0] - expected_lower) < 1e-4
         assert abs(conf_int[1] - expected_upper) < 1e-4
 
@@ -231,11 +217,9 @@ class TestCrossValAUCPipeline:
         clf = MockClassifier(pred_proba_map)
         cv = KFold(n_splits=2, shuffle=False)
 
-        scores, conf_int = cross_val_auc(
-            clf, X, y, scoring="roc_auc", cv=cv, confidence_level=None
-        )
+        scores, conf_int = cross_val_auc(clf, X, y, cv=cv, confidence_level=None)
 
-        np.testing.assert_array_almost_equal(scores, [0.5, 1.0], decimal=10)
+        np.testing.assert_array_almost_equal(np.asarray(scores), [0.5, 1.0], decimal=10)
         assert conf_int is None
 
     def test_with_real_estimator(self):
@@ -249,16 +233,62 @@ class TestCrossValAUCPipeline:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=5),
             confidence_level=0.95,
         )
 
         assert len(scores) == 5
         assert all(0 <= s <= 1 for s in scores)
+        assert conf_int is not None
         assert conf_int[0] < conf_int[1]
         assert 0 <= conf_int[0] <= 1
         assert 0 <= conf_int[1] <= 1
+
+    def test_global_vs_local_fold_weights_change_ci_not_scores(self):
+        """Global weighting should affect CI (IC variance) but not fold AUC scores."""
+        X = np.arange(12).reshape(-1, 1)
+        y = np.array([1, 1, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0])
+        pred_proba_map = {
+            0: 0.90,
+            1: 0.80,
+            2: 0.20,
+            3: 0.70,
+            4: 0.10,
+            5: 0.20,
+            6: 0.80,
+            7: 0.60,
+            8: 0.70,
+            9: 0.40,
+            10: 0.30,
+            11: 0.20,
+        }
+        clf = MockClassifier(pred_proba_map)
+        cv = KFold(n_splits=3, shuffle=False)
+
+        scores_global, ci_global = cross_val_auc(
+            clf,
+            X,
+            y,
+            cv=cv,
+            confidence_level=0.95,
+            use_global_weights=True,
+        )
+        scores_local, ci_local = cross_val_auc(
+            clf,
+            X,
+            y,
+            cv=cv,
+            confidence_level=0.95,
+            use_global_weights=False,
+        )
+
+        np.testing.assert_allclose(np.asarray(scores_global), np.asarray(scores_local))
+        assert ci_global is not None
+        assert ci_local is not None
+        assert not (
+            np.isclose(ci_global[0], ci_local[0])
+            and np.isclose(ci_global[1], ci_local[1])
+        )
 
 
 # =============================================================================
@@ -278,7 +308,6 @@ class TestEvalSubsetBasic:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=3),
             eval_subset=("category", "A"),
             confidence_level=0.95,
@@ -297,7 +326,6 @@ class TestEvalSubsetBasic:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=3),
             eval_subset=("category", None),
             confidence_level=0.95,
@@ -306,6 +334,7 @@ class TestEvalSubsetBasic:
         for cat in ["A", "B", "C"]:
             assert cat in scores
             assert len(scores[cat]) == 3
+            assert ci is not None
             assert f"score_{cat}" in ci
 
     def test_without_confidence_interval(self, simple_dataframe):
@@ -317,7 +346,6 @@ class TestEvalSubsetBasic:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=2),
             eval_subset=("category", None),
             confidence_level=None,
@@ -342,7 +370,6 @@ class TestEvalSubsetBasic:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=3),
             eval_subset=None,
             confidence_level=0.95,
@@ -401,7 +428,6 @@ class TestCategoricalColumnExclusion:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=3),
             eval_subset=("group", "GROUP_0"),
             confidence_level=0.95,
@@ -428,7 +454,6 @@ class TestCategoricalColumnExclusion:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=2),
             eval_subset=("metadata", categories[0]),
             confidence_level=0.95,
@@ -454,7 +479,6 @@ class TestCategoricalColumnExclusion:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=3),
             eval_subset=("category", None),
             confidence_level=0.95,
@@ -491,7 +515,6 @@ class TestIntegerCategories:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=3),
             eval_subset=("age_group", 3),
             confidence_level=0.95,
@@ -518,7 +541,6 @@ class TestIntegerCategories:
             LogisticRegression(random_state=42, max_iter=1000),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=3),
             eval_subset=("bracket", None),
             confidence_level=0.95,
@@ -526,6 +548,7 @@ class TestIntegerCategories:
 
         for bracket in [10, 20, 30, 40]:
             assert bracket in scores
+            assert ci is not None
             assert f"score_{bracket}" in ci
 
     def test_zero_based_categories(self):
@@ -541,7 +564,6 @@ class TestIntegerCategories:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=2),
             eval_subset=("category", 0),
         )
@@ -566,7 +588,6 @@ class TestIntegerCategories:
             LogisticRegression(random_state=42),
             X,
             y,
-            scoring="roc_auc",
             cv=KFold(n_splits=3),
             eval_subset=("category", None),
             confidence_level=0.95,

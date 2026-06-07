@@ -77,10 +77,11 @@ from sklearn.utils.metaestimators import _safe_split
 from sklearn.utils.parallel import Parallel, delayed
 from sklearn.utils.validation import _check_method_params, _num_samples
 
-from influence_curves import (
-    _compute_influence_curve_single_fold,
+from .influence_curves import (
+    compute_auc_influence_curve,
     compute_variance,
     compute_confidence_interval,
+    _compute_global_weights,
 )
 
 
@@ -92,7 +93,6 @@ def cross_val_auc(
     y=None,
     *,
     groups=None,
-    scoring=None,
     cv=None,
     n_jobs=None,
     verbose=0,
@@ -100,156 +100,82 @@ def cross_val_auc(
     pre_dispatch="2*n_jobs",
     error_score=np.nan,
     confidence_level=None,
+    use_global_weights=True,  # NEW: whether to apply global weighting to influence curves. Per LeDell et al. (2015), global rather than fold-local weighting is needed to get correct CIs.
     eval_subset=None,
 ):
-    """Evaluate a score by cross-validation.
+    """Run cross-validated ROC AUC with optional influence-curve confidence intervals.
 
-    Read more in the :ref:`User Guide <cross_validation>`.
+    This function is a specialized variant of cross-validation that always
+    evaluates ROC AUC (``scoring='roc_auc'``) and can return confidence intervals
+    estimated from influence curves.
 
     Parameters
     ----------
-    estimator : estimator object implementing 'fit'
-        The object to use to fit the data.
+    estimator : estimator object implementing ``fit``
+        The object to use for fitting.
 
-    X : {array-like, sparse matrix} of shape (n_samples, n_features)
-        The data to fit. Can be for example a list, or an array.
+    X : array-like or pandas.DataFrame of shape (n_samples, n_features)
+        Feature matrix.
 
-    y : array-like of shape (n_samples,) or (n_samples, n_outputs), \
-            default=None
-        The target variable to try to predict in the case of
-        supervised learning.
+        If ``eval_subset`` is not ``None``, ``X`` must be a pandas DataFrame and
+        the subset column is removed from model training/prediction and used only
+        for evaluation filtering.
+
+    y : array-like of shape (n_samples,), default=None
+        Binary target labels.
 
     groups : array-like of shape (n_samples,), default=None
-        Group labels for the samples used while splitting the dataset into
-        train/test set. Only used in conjunction with a "Group" :term:`cv`
-        instance (e.g., :class:`GroupKFold`).
+        Group labels used by group-aware CV splitters.
 
-        .. versionchanged:: 1.4
-            ``groups`` can only be passed if metadata routing is not enabled
-            via ``sklearn.set_config(enable_metadata_routing=True)``. When routing
-            is enabled, pass ``groups`` alongside other metadata via the ``params``
-            argument instead. E.g.:
-            ``cross_val_score(..., params={'groups': groups})``.
-
-    scoring : str or callable, default=None
-        Strategy to evaluate the performance of the `estimator` across cross-validation
-        splits.
-
-        - str: see :ref:`scoring_string_names` for options.
-        - callable: a scorer callable object (e.g., function) with signature
-          ``scorer(estimator, X, y)``, which should return only a single value.
-          See :ref:`scoring_callable` for details.
-        - `None`: the `estimator`'s
-          :ref:`default evaluation criterion <scoring_api_overview>` is used.
-
-        Similar to the use of `scoring` in :func:`cross_validate` but only a
-        single metric is permitted.
-
-    cv : int, cross-validation generator or an iterable, default=None
-        Determines the cross-validation splitting strategy.
-        Possible inputs for cv are:
-
-        - `None`, to use the default 5-fold cross validation,
-        - int, to specify the number of folds in a `(Stratified)KFold`,
-        - :term:`CV splitter`,
-        - An iterable that generates (train, test) splits as arrays of indices.
-
-        For `int`/`None` inputs, if the estimator is a classifier and `y` is
-        either binary or multiclass, :class:`StratifiedKFold` is used. In all
-        other cases, :class:`KFold` is used. These splitters are instantiated
-        with `shuffle=False` so the splits will be the same across calls.
-
-        Refer :ref:`User Guide <cross_validation>` for the various
-        cross-validation strategies that can be used here.
-
-        .. versionchanged:: 0.22
-            `cv` default value if `None` changed from 3-fold to 5-fold.
+    cv : int, CV splitter, or iterable of (train, test) indices, default=None
+        Cross-validation splitting strategy.
 
     n_jobs : int, default=None
-        Number of jobs to run in parallel. Training the estimator and computing
-        the score are parallelized over the cross-validation splits.
-        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
-        ``-1`` means using all processors. See :term:`Glossary <n_jobs>`
-        for more details.
+        Number of jobs to run in parallel over CV splits.
 
     verbose : int, default=0
         The verbosity level.
 
     params : dict, default=None
-        Parameters to pass to the underlying estimator's ``fit``, the scorer,
-        and the CV splitter.
-
-        .. versionadded:: 1.4
+        Metadata/parameters forwarded to estimator fit, scorer, and splitter,
+        following sklearn's metadata-routing conventions.
 
     pre_dispatch : int or str, default='2*n_jobs'
-        Controls the number of jobs that get dispatched during parallel
-        execution. Reducing this number can be useful to avoid an
-        explosion of memory consumption when more jobs get dispatched
-        than CPUs can process. This parameter can be:
-
-        - ``None``, in which case all the jobs are immediately created and spawned. Use
-          this for lightweight and fast-running jobs, to avoid delays due to on-demand
-          spawning of the jobs
-        - An int, giving the exact number of total jobs that are spawned
-        - A str, giving an expression as a function of n_jobs, as in '2*n_jobs'
+        Number of jobs pre-dispatched by joblib.
 
     error_score : 'raise' or numeric, default=np.nan
-        Value to assign to the score if an error occurs in estimator fitting.
-        If set to 'raise', the error is raised.
-        If a numeric value is given, FitFailedWarning is raised.
+        Value assigned when fitting/scoring fails for a split.
 
-        .. versionadded:: 0.20
+    confidence_level : float or None, default=None
+        Confidence level for interval estimation.
+
+        - If ``None``, only fold AUC scores are returned.
+        - If a float in (0, 1), influence curves are computed and confidence
+          interval(s) are returned.
+
+    use_global_weights : bool, default=True
+        Whether to reweight fold influence curves to use global class proportions
+        (LeDell et al., 2015) before variance estimation.
 
     eval_subset : tuple or None, default=None
-        Evaluate model performance on categorical subsets of test data while
-        training on the full dataset.
+        Optional subset evaluation mode ``(column_name, category_value)``.
 
-        - If None (default): evaluate on full test set (standard behavior)
-        - If ('column_name', 'category_value'): evaluate only on test samples
-          where X[column_name] == category_value
-        - If ('column_name', None): evaluate separately for each unique value
-          in X[column_name]
-
-        Note: The categorical column is automatically excluded from model training
-        and prediction. It is used only for filtering test data, ensuring the
-        model cannot learn from it.
-
-        Requirements:
-
-        - X must be a pandas DataFrame
-        - Category values must be hashable (strings, numbers, tuples)
-
-        Return format when eval_subset is used:
-
-        - scores: dict mapping category -> array
-        - conf_int: dict mapping 'score_category' -> (lower, upper)
+        - ``None``: evaluate on each full test fold.
+        - ``(col, value)``: evaluate only rows where ``X[col] == value``.
+        - ``(col, None)``: evaluate each category in ``X[col]`` separately.
 
     Returns
     -------
-    scores : ndarray of float of shape=(len(list(cv)),)
-        Array of scores of the estimator for each run of the cross validation.
+    scores : ndarray or dict
+        - If ``eval_subset is None``: ndarray of per-fold ROC AUC values.
+        - If ``eval_subset is not None``: dict mapping category value to per-fold
+          ROC AUC array.
 
-    See Also
-    --------
-    cross_validate : To run cross-validation on multiple metrics and also to
-        return train scores, fit times and score times.
-
-    cross_val_predict : Get predictions from each split of cross-validation for
-        diagnostic purposes.
-
-    sklearn.metrics.make_scorer : Make a scorer from a performance metric or
-        loss function.
-
-    Examples
-    --------
-    >>> from sklearn import datasets, linear_model
-    >>> from sklearn.model_selection import cross_val_score
-    >>> diabetes = datasets.load_diabetes()
-    >>> X = diabetes.data[:150]
-    >>> y = diabetes.target[:150]
-    >>> lasso = linear_model.Lasso()
-    >>> print(cross_val_score(lasso, X, y, cv=3))
-    [0.3315057  0.08022103 0.03531816]
+    conf_int : tuple, dict, or None
+        - ``None`` if ``confidence_level is None``.
+        - If ``eval_subset is None``: ``(lower, upper)``.
+        - If ``eval_subset is not None``: dict mapping score key
+          (for example ``'score_A'``) to ``(lower, upper)``.
     """
     # Validate eval_subset
     if eval_subset is not None:
@@ -264,10 +190,11 @@ def cross_val_auc(
             raise ValueError(f"Column '{col_name}' not found in DataFrame")
 
     # To ensure multimetric format is not supported
+    scoring = "roc_auc"
     scorer = check_scoring(estimator, scoring=scoring)
 
     # Determine if we need influence curves for confidence intervals
-    compute_ic = confidence_level is not None and scoring == "roc_auc"
+    compute_ic = confidence_level is not None
 
     cv_results = cross_validate(
         estimator=estimator,
@@ -284,6 +211,7 @@ def cross_val_auc(
         return_estimator=False,  # Don't need estimators anymore
         return_indices=False,  # Don't need indices anymore
         return_influence_curves=compute_ic,  # NEW: compute ICs in the loop
+        use_global_weights=use_global_weights,  # NEW: whether to apply global weighting to influence curves
         eval_subset=eval_subset,  # NEW: category-specific evaluation
         manual_roc_auc=scoring == "roc_auc",  # Avoid scorer tag edge-cases
     )
@@ -303,7 +231,6 @@ def cross_val_auc(
                 test_key = f"test_{cat_key}"
                 if test_key in cv_results:
                     test_scores_cat = cv_results[test_key]
-                    # V = len(test_scores_cat)
                     variance = compute_variance(ic_cat)
                     estimate = np.mean(test_scores_cat)
                     conf_int[cat_key] = compute_confidence_interval(
@@ -311,7 +238,6 @@ def cross_val_auc(
                     )
         else:
             # Single or no eval_subset
-            # V = len(cv_results["test_score"])  # number of folds
             variance = compute_variance(ic_all)
             estimate = np.mean(cv_results["test_score"])
             conf_int = compute_confidence_interval(
@@ -363,6 +289,7 @@ def cross_validate(
     return_indices=False,
     error_score=np.nan,
     return_influence_curves=False,  # NEW: for AUC confidence intervals
+    use_global_weights=True,  # NEW: whether to apply global weighting to influence curves. Per LeDell et al. (2015), global rather than fold-local weighting is needed to get correct CIs.
     eval_subset=None,  # NEW: for category-specific evaluation
     manual_roc_auc=False,
 ):
@@ -434,6 +361,7 @@ def cross_validate(
             return_estimator=return_estimator,
             error_score=error_score,
             return_influence_curves=return_influence_curves,  # NEW
+            use_global_weights=use_global_weights,  # NEW
             eval_subset=eval_subset,  # NEW
             manual_roc_auc=manual_roc_auc,
         )
@@ -529,6 +457,7 @@ def _fit_and_score(
     candidate_progress=None,
     error_score=np.nan,
     return_influence_curves=False,  # NEW
+    use_global_weights=True,  # NEW
     eval_subset=None,  # NEW
     manual_roc_auc=False,
 ):
@@ -732,13 +661,7 @@ def _fit_and_score(
         if return_influence_curves:
             influence_curve = None
             influence_curve_indices = None
-
-            # Compute global class proportions from the FULL dataset (Pn)
-            # Per LeDell et al. (2015), these should NOT be fold-local
             y_full = y if not hasattr(y, "values") else y.values
-            n_total = len(y_full)
-            emp_prob_1_global = np.sum(y_full == 1) / n_total
-            emp_prob_0_global = np.sum(y_full == 0) / n_total
 
             if hasattr(estimator, "predict_proba"):
                 try:
@@ -754,9 +677,15 @@ def _fit_and_score(
                         y_pred_np = _convert_to_numpy(y_pred, xp=np)
                         test_np = _convert_to_numpy(test, xp=np)
 
-                        influence_curve = _compute_influence_curve_single_fold(
-                            y_pred_np, y_test_np, emp_prob_1_global, emp_prob_0_global
+                        influence_curve = compute_auc_influence_curve(
+                            y_pred_np,
+                            y_test_np,
                         )
+                        if use_global_weights:
+                            # Global rather than fold weighting per LeDell et al. (2015)
+                            weights_global = _compute_global_weights(y_full, y_test_np)
+                            influence_curve *= weights_global
+
                         influence_curve_indices = test_np
                     else:
                         # Compute ICs per category
@@ -786,12 +715,23 @@ def _fit_and_score(
                             y_pred_cat_np = _convert_to_numpy(y_pred_cat, xp=np)
                             test_cat_np = _convert_to_numpy(test_cat, xp=np)
 
-                            ic_cat = _compute_influence_curve_single_fold(
+                            ic_cat = compute_auc_influence_curve(
                                 y_pred_cat_np,
                                 y_test_cat_np,
-                                emp_prob_1_global,
-                                emp_prob_0_global,
                             )
+                            if use_global_weights:
+                                # Global rather than fold weighting per LeDell et al. (2015)
+                                full_mask = X[col_name] == category
+                                full_mask_np = (
+                                    full_mask.values
+                                    if hasattr(full_mask, "values")
+                                    else full_mask
+                                )
+                                y_full_cat = y_full[full_mask_np]
+                                weights_global = _compute_global_weights(
+                                    y_full_cat, y_test_cat_np
+                                )
+                                ic_cat *= weights_global
 
                             if isinstance(scorer, _MultimetricScorer):
                                 metric_name = list(scorer._scorers.keys())[0]
