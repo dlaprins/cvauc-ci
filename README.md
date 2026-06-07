@@ -45,6 +45,15 @@ print(f"AUC: {scores.mean():.3f} (95% CI: {conf_int[0]:.3f}-{conf_int[1]:.3f})")
 - Influence curve-based confidence intervals (faster runtime compared to bootstrap)
 - Subset evaluation via `eval_subset` parameter for subgroup/fairness analysis
 
+## Methodological notes
+
+- Tie handling: this package uses tie-aware pairwise comparisons (half-credit for
+    equal scores) when computing influence-curve terms, matching
+    `sklearn.metrics.roc_auc_score` semantics.
+- R `cvAUC` divergence: the reference R implementation uses strict inequalities
+    in its influence-curve rank terms. On tie-heavy data, that can produce
+    influence-curve behavior that is not fully aligned with tie-aware AUC.
+
 ## References
 
 LeDell E, Petersen M, van der Laan M (2015). "Computationally efficient confidence intervals for cross-validated area under the ROC curve estimates." *Electronic Journal of Statistics*, 9(1), 1583-1607. [PubMed](https://pubmed.ncbi.nlm.nih.gov/26279737/)

@@ -26,6 +26,7 @@ import pytest
 from typing import cast
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import KFold
 
 from cvauc_ci import (
@@ -180,6 +181,46 @@ class TestInfluenceCurveMath:
         width_99 = ci_99[1] - ci_99[0]
 
         assert width_90 < width_95 < width_99
+
+    def test_tie_aware_influence_curve_matches_manual_values(self):
+        """IC terms should use half-credit for ties in pairwise comparisons."""
+        # Positives and negatives both contain ties at score 0.2.
+        y_true = np.array([1, 1, 0, 0])
+        y_pred = np.array([0.2, 0.8, 0.2, 0.9])
+
+        ic = compute_auc_influence_curve(y_pred, y_true)
+
+        # AUC with ties: 1.5 / 4 = 0.375
+        # p1 for positives (vs negatives): [0.25, 0.5]
+        # p0 for negatives (vs positives): [0.75, 0.0]
+        # emp_prob_1 = emp_prob_0 = 0.5
+        # IC = (p - auc) / emp_prob -> [-0.25, 0.25, 0.75, -0.75]
+        expected_ic = np.array([-0.25, 0.25, 0.75, -0.75])
+        np.testing.assert_allclose(ic, expected_ic, atol=1e-12)
+
+    def test_tie_aware_auc_identity_holds(self):
+        """Empirical AUC identity with tie-aware terms should hold exactly."""
+        y_true = np.array([1, 0, 1, 0, 1, 0])
+        y_pred = np.array([0.7, 0.7, 0.5, 0.3, 0.3, 0.3])
+
+        n = len(y_true)
+        n1 = np.sum(y_true == 1)
+        n0 = np.sum(y_true == 0)
+        emp_prob_1 = n1 / n
+        emp_prob_0 = n0 / n
+
+        auc = roc_auc_score(y_true, y_pred)
+        ic = compute_auc_influence_curve(y_pred, y_true)
+
+        pos_ic = ic[y_true == 1]
+        neg_ic = ic[y_true == 0]
+
+        p1_from_ic = auc + emp_prob_1 * pos_ic
+        p0_from_ic = auc + emp_prob_0 * neg_ic
+
+        # Mean pairwise probabilities should equal AUC when ties are half-credit.
+        assert np.isclose(np.mean(p1_from_ic), auc)
+        assert np.isclose(np.mean(p0_from_ic), auc)
 
 
 # =============================================================================

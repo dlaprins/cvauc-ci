@@ -40,6 +40,12 @@ def compute_auc_influence_curve(y_pred, y_true):
     should be computed from the entire dataset, not the validation fold.
     The ranking comparisons P(ψ<w|Y=0) and P(ψ>w|Y=1) are computed within
     the validation fold.
+
+    This implementation intentionally uses tie-aware pairwise comparisons
+    (half credit for equal scores) to align influence-curve terms with
+    sklearn.metrics.roc_auc_score. The original R cvAUC implementation
+    uses strict inequalities, which can diverge from tie-aware AUC values
+    when tied prediction scores are present.
     """
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
@@ -63,10 +69,17 @@ def compute_auc_influence_curve(y_pred, y_true):
     y_pred_1 = y_pred[y_true == 1]
     y_pred_0 = y_pred[y_true == 0]
 
-    # For each sample, count how many negatives have lower scores
-    # and how many positives have higher scores
-    p1 = np.sum(y_pred_0[:, np.newaxis] < y_pred, axis=0) / n0
-    p0 = np.sum(y_pred_1[:, np.newaxis] > y_pred, axis=0) / n1
+    # For each sample, count how many negatives have lower scores and how many positives have higher scores.
+    # Use tie-aware ranks that match roc_auc_score semantics:
+    # strict wins + half credit for ties.
+    p1 = (
+        np.sum(y_pred_0[:, np.newaxis] < y_pred, axis=0)
+        + 0.5 * np.sum(y_pred_0[:, np.newaxis] == y_pred, axis=0)
+    ) / n0
+    p0 = (
+        np.sum(y_pred_1[:, np.newaxis] > y_pred, axis=0)
+        + 0.5 * np.sum(y_pred_1[:, np.newaxis] == y_pred, axis=0)
+    ) / n1
 
     # Compute influence curve for each sample
     is_positive = y_true == 1
