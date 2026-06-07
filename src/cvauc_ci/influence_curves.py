@@ -140,27 +140,6 @@ def compute_confidence_interval(estimate, variance, n, confidence_level=0.95):
     return (lower, upper)
 
 
-# def _compute_fold_weights(y_true, fold_sizes):
-#     """Compute fold weights for influence curve aggregation.
-
-#     Per LeDell et al. (2015), fold weights are defined by total sample distribution, not fold-local distribution.
-#     This requires correcting generic test set weights by the ratio of global to fold-local class proportions.
-
-#     Parameters
-#     ----------
-#     fold_sizes : list of int
-#         List of sample sizes for each fold.
-
-#     Returns
-#     -------
-#     fold_weights : list of float
-#         List of fold weights for influence curve aggregation.
-#     """
-#     n_global = len(y_true)
-#     fold_weights = n_global / (np.array(fold_sizes) * len(fold_sizes))  # V is number of folds
-#     return fold_weights
-
-
 def _compute_global_weights(y_global, y_test):
     """Construct sample weights.
 

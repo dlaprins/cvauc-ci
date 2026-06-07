@@ -231,10 +231,13 @@ def cross_val_auc(
                 test_key = f"test_{cat_key}"
                 if test_key in cv_results:
                     test_scores_cat = cv_results[test_key]
+                    n_cat = len(ic_cat)
+                    if n_cat == 0:
+                        continue
                     variance = compute_variance(ic_cat)
                     estimate = np.mean(test_scores_cat)
                     conf_int[cat_key] = compute_confidence_interval(
-                        estimate, variance, n, confidence_level
+                        estimate, variance, n_cat, confidence_level
                     )
         else:
             # Single or no eval_subset
@@ -402,24 +405,23 @@ def cross_validate(
             first_ic = results["influence_curve"][0]
 
             if isinstance(first_ic, dict):
-                # Multi-category: aggregate per category
-                n_samples = len(y) if y is not None else X.shape[0]
-                categories = first_ic.keys()
-                ic_all = {cat: np.zeros(n_samples) for cat in categories}
-
-                ic_indices = results["influence_curve_indices"]
+                # Multi-category: aggregate per-category IC values only.
+                ic_parts = {}
                 ics = results["influence_curve"]
 
-                for ic_dict, indices_dict in zip(ics, ic_indices):
-                    if ic_dict is not None and indices_dict is not None:
-                        for cat in categories:
-                            if (
-                                ic_dict[cat] is not None
-                                and indices_dict[cat] is not None
-                            ):
-                                ic_all[cat][indices_dict[cat]] = ic_dict[cat]
+                for ic_dict in ics:
+                    if ic_dict is None:
+                        continue
+                    for cat, ic_cat in ic_dict.items():
+                        if ic_cat is None:
+                            continue
+                        ic_cat_np = _convert_to_numpy(ic_cat, xp=np)
+                        ic_parts.setdefault(cat, []).append(ic_cat_np)
 
-                ret["influence_curves"] = ic_all
+                ret["influence_curves"] = {
+                    cat: np.concatenate(parts) if parts else np.array([], dtype=float)
+                    for cat, parts in ic_parts.items()
+                }
             else:
                 # Single category or no eval_subset
                 n_samples = len(y) if y is not None else X.shape[0]
@@ -661,7 +663,8 @@ def _fit_and_score(
         if return_influence_curves:
             influence_curve = None
             influence_curve_indices = None
-            y_full = y if not hasattr(y, "values") else y.values
+            # Normalize once so boolean masking is safe for list-like targets.
+            y_full_np = _convert_to_numpy(y, xp=np) if y is not None else None
 
             if hasattr(estimator, "predict_proba"):
                 try:
@@ -683,7 +686,9 @@ def _fit_and_score(
                         )
                         if use_global_weights:
                             # Global rather than fold weighting per LeDell et al. (2015)
-                            weights_global = _compute_global_weights(y_full, y_test_np)
+                            weights_global = _compute_global_weights(
+                                y_full_np, y_test_np
+                            )
                             influence_curve *= weights_global
 
                         influence_curve_indices = test_np
@@ -691,6 +696,7 @@ def _fit_and_score(
                         # Compute ICs per category
                         influence_curve = {}
                         influence_curve_indices = {}
+                        y_test_np = _convert_to_numpy(y_test, xp=np)
 
                         for category in eval_categories:
                             mask = X_test[col_name] == category
@@ -701,7 +707,7 @@ def _fit_and_score(
                             )
 
                             X_test_cat = X_test_for_pred[mask_np]
-                            y_test_cat = y_test[mask_np]
+                            y_test_cat_np = y_test_np[mask_np]
                             test_cat = test[mask_np]
 
                             y_pred_proba_cat = estimator.predict_proba(X_test_cat)
@@ -711,7 +717,6 @@ def _fit_and_score(
                             else:
                                 y_pred_cat = y_pred_proba_cat[:, -1]
 
-                            y_test_cat_np = _convert_to_numpy(y_test_cat, xp=np)
                             y_pred_cat_np = _convert_to_numpy(y_pred_cat, xp=np)
                             test_cat_np = _convert_to_numpy(test_cat, xp=np)
 
@@ -725,9 +730,9 @@ def _fit_and_score(
                                 full_mask_np = (
                                     full_mask.values
                                     if hasattr(full_mask, "values")
-                                    else full_mask
+                                    else np.asarray(full_mask)
                                 )
-                                y_full_cat = y_full[full_mask_np]
+                                y_full_cat = y_full_np[full_mask_np]
                                 weights_global = _compute_global_weights(
                                     y_full_cat, y_test_cat_np
                                 )

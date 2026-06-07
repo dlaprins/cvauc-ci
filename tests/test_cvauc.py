@@ -23,6 +23,7 @@ Combined: variance=1/3 (R-style, without /V), mean AUC=0.75
 import numpy as np
 import pandas as pd
 import pytest
+from typing import cast
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import KFold
@@ -396,6 +397,103 @@ class TestEvalSubsetBasic:
 
         with pytest.raises(ValueError, match="DataFrame"):
             cross_val_auc(LogisticRegression(), X, y, eval_subset=("col", "A"))
+
+
+class TestSubgroupCIMethodology:
+    """Regression tests for subgroup CI denominator and IC aggregation behavior."""
+
+    def _ci_width(self, ci):
+        return float(ci[1] - ci[0])
+
+    def test_small_subgroup_ci_wider_than_full_population(self):
+        """Small subgroup should generally have wider CI than full-population estimate."""
+        rng = np.random.RandomState(7)
+        n = 500
+        x1 = rng.normal(size=n)
+        x2 = rng.normal(size=n)
+        logits = x1 + 0.5 * x2 + rng.normal(scale=0.6, size=n)
+        y = (logits > np.median(logits)).astype(int)
+
+        group = np.array(["A"] * 80 + ["B"] * (n - 80), dtype=object)
+        perm = rng.permutation(n)
+
+        X = pd.DataFrame(
+            {
+                "x1": x1[perm],
+                "x2": x2[perm],
+                "group": group[perm],
+            }
+        )
+        y = y[perm]
+
+        cv = KFold(n_splits=5, shuffle=True, random_state=19)
+        est = LogisticRegression(random_state=0, max_iter=1000)
+
+        _, ci_full = cross_val_auc(
+            est, X[["x1", "x2"]], y, cv=cv, confidence_level=0.95
+        )
+        _, ci_sub = cross_val_auc(
+            est,
+            X,
+            y,
+            cv=cv,
+            confidence_level=0.95,
+            eval_subset=("group", "A"),
+        )
+
+        assert ci_full is not None
+        assert ci_sub is not None
+        ci_sub_dict = cast(dict, ci_sub)
+        assert "score_A" in ci_sub_dict
+        assert self._ci_width(ci_sub_dict["score_A"]) > self._ci_width(ci_full)
+
+    def test_subgroup_ci_width_reacts_to_subgroup_sample_size(self):
+        """Holding signal generation fixed, larger subgroup should have narrower CI."""
+        rng = np.random.RandomState(11)
+        n = 700
+        x1 = rng.normal(size=n)
+        x2 = rng.normal(size=n)
+        logits = x1 + 0.4 * x2 + rng.normal(scale=0.7, size=n)
+        y = (logits > np.median(logits)).astype(int)
+
+        base = pd.DataFrame({"x1": x1, "x2": x2})
+        cv = KFold(n_splits=5, shuffle=True, random_state=23)
+        est = LogisticRegression(random_state=0, max_iter=1000)
+
+        group_small = np.where(rng.rand(n) < 0.18, "A", "B")
+        X_small = base.copy()
+        X_small["group"] = group_small
+
+        group_large = np.where(rng.rand(n) < 0.45, "A", "B")
+        X_large = base.copy()
+        X_large["group"] = group_large
+
+        _, ci_small = cross_val_auc(
+            est,
+            X_small,
+            y,
+            cv=cv,
+            confidence_level=0.95,
+            eval_subset=("group", "A"),
+        )
+        _, ci_large = cross_val_auc(
+            est,
+            X_large,
+            y,
+            cv=cv,
+            confidence_level=0.95,
+            eval_subset=("group", "A"),
+        )
+
+        assert ci_small is not None
+        assert ci_large is not None
+        ci_small_dict = cast(dict, ci_small)
+        ci_large_dict = cast(dict, ci_large)
+        assert "score_A" in ci_small_dict
+        assert "score_A" in ci_large_dict
+        assert self._ci_width(ci_small_dict["score_A"]) > self._ci_width(
+            ci_large_dict["score_A"]
+        )
 
 
 # =============================================================================
