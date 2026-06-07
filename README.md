@@ -27,7 +27,7 @@ uv run pre-commit install
 ## Usage
 
 ```python
-from cvauc import cross_val_auc
+from cvauc_ci import cross_val_auc
 from sklearn.linear_model import LogisticRegression
 
 scores, conf_int = cross_val_auc(
